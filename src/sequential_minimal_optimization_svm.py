@@ -11,13 +11,14 @@ Date:       Jan 8 2021
 import time
 
 import numpy as np
-import matplotlib.pyplot as plt
 import enum
 from sklearn.datasets import make_blobs, make_circles
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import confusion_matrix
 import seaborn as sns
-
+from sklearn import datasets
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
 
 class SMOsvm:
     """ Implement the Sequential Minimal Optimization (SMO) algorithm designed by J. C. Platt and described in:
@@ -29,7 +30,7 @@ class SMOsvm:
         RBF = 2
 
         def __str__(self):
-            if self.value == self.LINEAR:
+            if self.name == self.LINEAR:
                 return "Linear"
             return "RBF"
 
@@ -49,7 +50,7 @@ class SMOsvm:
         self.C = c_in
         self.kernel = self.linear_kernel if self.kernel_type == self.Kernel.LINEAR else self.radial_basis_function_kernel
         self.lagrange_alphas = alphas
-        self.bias = b
+        self.b = b
         self.errors = errors
         self._obj = []  # record of svm objective function value
         self.m = len(self.X)  # store size of training set
@@ -62,9 +63,9 @@ class SMOsvm:
         return x @ y.T + c
 
     @staticmethod
-    def radial_basis_function_kernel(x, y, sigma=1):
+    def radial_basis_function_kernel(x, y, sigma=0.5):
         """Returns the gaussian similarity of arrays `x` and `y` with
-            kernel width parameter `sigma` (set to 1 by default)."""
+            kernel width parameter `sigma` (set to 0.5 by default)."""
 
         if np.ndim(x) == 1 and np.ndim(y) == 1:
             result = np.exp(- (np.linalg.norm(x - y, 2)) ** 2 / (2 * sigma ** 2))
@@ -84,10 +85,10 @@ class SMOsvm:
     def decision_function(self, x_train, x_test):
         """Applies the SVM decision function to the input feature vectors in `x_test`."""
         # result = np.matmul((self.lagrange_alphas * self.y), self.kernel(x_train, x_test)) - self.bias
-        result = ((self.lagrange_alphas * self.y) @ self.kernel(x_train, x_test)) - self.bias
+        result = ((self.lagrange_alphas * self.y) @ self.kernel(x_train, x_test)) - self.b
         return result
 
-    def optimize_pair_step(self, i1, i2):
+    def optimize_pair_step(self, i1, i2, c_in = 1.0):
         # Skip if chosen alphas are the same
         if i1 == i2:
             return 0, self
@@ -160,14 +161,14 @@ class SMOsvm:
 
         # Update threshold b to reflect newly calculated alphas
         # Calculate both possible thresholds
-        b1 = error1 + target1 * (a1 - alph1) * k11 + target2 * (a2 - alph2) * k12 + self.bias
-        b2 = error2 + target1 * (a1 - alph1) * k12 + target2 * (a2 - alph2) * k22 + self.bias
+        b1 = error1 + target1 * (a1 - alph1) * k11 + target2 * (a2 - alph2) * k12 + self.b
+        b2 = error2 + target1 * (a1 - alph1) * k12 + target2 * (a2 - alph2) * k22 + self.b
 
         # Set new threshold based on if a1 or a2 is bound by low_bound and/or high_bound
-        global global_c
-        if 0 < a1 and a1 < global_c:
+        # global global_c
+        if 0 < a1 and a1 < c_in:
             b_new = b1
-        elif 0 < a2 and a2 < global_c:
+        elif 0 < a2 and a2 < c_in:
             b_new = b2
         # Average thresholds if both are bound
         else:
@@ -186,21 +187,21 @@ class SMOsvm:
         # Set non-optimized errors based on equation 12.11 in Platt's book
         non_opt = [n for n in range(self.m) if (n != i1 and n != i2)]
         self.errors[non_opt] = self.errors[non_opt] + target1 * (a1 - alph1) * self.kernel(self.X[i1], self.X[
-            non_opt]) + target2 * (a2 - alph2) * self.kernel(self.X[i2], self.X[non_opt]) + self.bias - b_new
+            non_opt]) + target2 * (a2 - alph2) * self.kernel(self.X[i2], self.X[non_opt]) + self.b - b_new
 
         # Update model threshold
-        self.bias = b_new
+        self.b = b_new
 
         return 1, self
 
-    def examine_example(self, i2, tolerance):
+    def examine_example(self, i2, tolerance, c_in):
         y2 = self.y[i2]
         alph2 = self.lagrange_alphas[i2]
         E2 = self.errors[i2]
         r2 = E2 * y2
 
         # Proceed if error is within specified tolerance (tol)
-        if (r2 < - tolerance and alph2 < self.C) or (r2 > tolerance and alph2 > 0):
+        if ((r2 < -error_tolerance and alph2 < self.C) or (r2 > error_tolerance and alph2 > 0)):
 
             if len(self.lagrange_alphas[(self.lagrange_alphas != 0) & (self.lagrange_alphas != self.C)]) > 1:
                 # Use 2nd choice heuristic is choose max difference in error
@@ -208,27 +209,28 @@ class SMOsvm:
                     i1 = np.argmin(self.errors)
                 elif self.errors[i2] <= 0:
                     i1 = np.argmax(self.errors)
-                step_result, res_model = self.optimize_pair_step(i1, i2)
+                step_result, res_model = self.optimize_pair_step(i1, i2, c_in)
                 if step_result:
                     return 1, res_model
 
             # Loop through non-zero and non-C lagrange_alphas, starting at a random point
             for i1 in np.roll(np.where((self.lagrange_alphas != 0) & (self.lagrange_alphas != self.C))[0],
                               np.random.choice(np.arange(self.m))):
-                step_result, res_model = self.optimize_pair_step(i1, i2)
+                step_result, res_model = self.optimize_pair_step(i1, i2, c_in)
                 if step_result:
                     return 1, res_model
 
             # loop through all lagrange_alphas, starting at a random point
             for i1 in np.roll(np.arange(self.m), np.random.choice(np.arange(self.m))):
-                step_result, res_model = self.optimize_pair_step(i1, i2)
+                step_result, res_model = self.optimize_pair_step(i1, i2, c_in)
                 if step_result:
                     return 1, res_model
 
         return 0, self
 
-    def train(self, tolerance):
-        print("SMO SVM starts training with " + str(self.kernel_type) + " kernel")
+    def train(self, tolerance, c_in):
+        kernel_name = "Linear" if self.kernel_type == self.Kernel.LINEAR else "RBF"
+        print("SMO SVM starts training with " + kernel_name + " kernel")
         numChanged = 0
         examineAll = 1
 
@@ -237,7 +239,7 @@ class SMOsvm:
             if examineAll:
                 # loop over all training examples
                 for i in range(self.lagrange_alphas.shape[0]):
-                    examine_result, model_res = self.examine_example(i, tolerance)
+                    examine_result, model_res = self.examine_example(i, tolerance, c_in)
                     numChanged += examine_result
                     if examine_result:
                         obj_result = self.objective_function(self.lagrange_alphas, self.X)
@@ -245,7 +247,7 @@ class SMOsvm:
             else:
                 # loop over examples where alphas are not already at their limits
                 for i in np.where((self.lagrange_alphas != 0) & (self.lagrange_alphas != self.C))[0]:
-                    examine_result, model_res = self.examine_example(i, tolerance)
+                    examine_result, model_res = self.examine_example(i, tolerance, c_in)
                     numChanged += examine_result
                     if examine_result:
                         obj_result = self.objective_function(self.lagrange_alphas, self.X)
@@ -258,11 +260,11 @@ class SMOsvm:
         return model_res
 
     def predict(self, test_set):
-        prediction = numpy.sign(self.decision_function(self.X, test_set))
+        prediction = np.sign(self.decision_function(self.X, test_set))
         return prediction
 
 
-def plot_decision_boundary(model_in, ax, resolution=100, colors=('b', 'k', 'r'), levels=(-1, 0, 1)):
+def plot_decision_boundary(model_in, ax, x_test, y_test, resolution=100, colors=('b', 'k', 'r'), levels=(-1, 0, 1)):
     """Plots the model's decision boundary on the input axes object.
     Range of decision boundary grid is determined by the training data.
     Returns decision boundary grid and axes object (`grid`, `ax`)."""
@@ -287,6 +289,17 @@ def plot_decision_boundary(model_in, ax, resolution=100, colors=('b', 'k', 'r'),
     return grid, ax
 
 
+def plot_confusion(trained_model, x_test, y_test, class_a, class_b):
+    y_fit = trained_model.predict(x_test)
+
+    mat = confusion_matrix(y_test, y_fit)
+    sns.heatmap(mat.T, square=True, annot=True, fmt='d', cbar=False, xticklabels=[class_a, class_b],
+                yticklabels=[class_a, class_b])
+    plt.xlabel('true label')
+    plt.ylabel('predicted label');
+    plt.show()
+
+
 def test_dimensions():
     x_len, y_len = 5, 10
     actual_dim_linear_k = SMOsvm.linear_kernel(np.random.rand(x_len, 1), np.random.rand(y_len, 1)).shape
@@ -300,14 +313,18 @@ def test_dimensions():
 
 
 def test_linear_model():
+    class_A = 1
+    class_B = -1
     # Test linear data
-    x_train, y = make_blobs(n_samples=1000, centers=2, n_features=2, random_state=1)
-    test_model(x_train, y, SMOsvm.Kernel.LINEAR)
+    x_train, y_train = make_blobs(n_samples=1000, centers=2, n_features=2, random_state=1)
+    x_test, y_test = make_blobs(n_samples=100, centers=2, n_features=2, random_state=1)
+    test_model(x_train, y_train, SMOsvm.Kernel.LINEAR, x_test, y_test, class_A, class_B)
 
 
 def test_rbf():
-    x_train, y = make_circles(n_samples=500, noise=0.1, factor=0.1, random_state=1)
-    test_model(x_train, y, SMOsvm.Kernel.RBF)
+    x_train, y_train = make_circles(n_samples=500, noise=0.1, factor=0.1, random_state=1)
+    x_test, y_test = make_circles(n_samples=50, noise=0.3, factor=0.1, random_state=1)
+    test_model(x_train, y_train, SMOsvm.Kernel.RBF, x_test, y_test, 1, -1)
 
 
 def show_timer(start, end):
@@ -318,33 +335,40 @@ def show_timer(start, end):
                                                                                                       seconds))
 
 
-def test_model(x_train, y, kernel):
+def test_model(x_train, y_train, kernel, x_test, y_test, class_a, class_b):
     tic = time.perf_counter()
-    scaler = StandardScaler()
-    x_train_scaled = scaler.fit_transform(x_train, y)
-    y[y == 0] = -1
+    # scaler = StandardScaler()
+    # x_train_scaled = scaler.fit_transform(x_train, y_train)
+    x_train_scaled = x_train
+    y_train[y_train == 0] = -1
+    y_test[y_test == 0] = -1
     # Set model parameters and initial values
     m = len(x_train_scaled)
 
     initial_alphas = np.zeros(m)
     initial_b = 0.0
     # Instantiate model
-    model = SMOsvm(x_train_scaled, y, global_c, kernel, initial_alphas, initial_b, np.zeros(m))
+    model = SMOsvm(x_train_scaled, y_train, global_c, kernel, initial_alphas, initial_b, np.zeros(m))
     # Initialize error cache
     initial_error = model.decision_function(model.X, model.X) - model.y
     model.errors = initial_error
-    output = model.train(error_tolerance)
-
+    output = model.train(error_tolerance, global_c)
+    y_predicted = output.predict(x_test)
+    # print("Predicted:")
+    # print(y_predicted)
+    # print("Expected:")
+    # print(y_test)
+    accuracy = [int(y_predicted[i] == y_test[i]) for i in range(0, len(y_test))]
+    print(f'Accuracy: {str(sum(accuracy)/len(y_test)*100)}%')
+    plot_confusion(output, x_test, y_test, class_a, class_b)
     fig, ax = plt.subplots()
-    grid, ax = plot_decision_boundary(output, ax)
+    grid, ax = plot_decision_boundary(output, ax, x_test, y_test)
     plt.show()
     toc = time.perf_counter()
     show_timer(tic, toc)
 
 
 # Set tolerances
-class_A = 0
-class_B = 1
 error_tolerance = 0.01  # error tolerance
 alpha_tolerance = 0.01  # alpha tolerance
 
@@ -352,5 +376,5 @@ global_c = 1000.0
 test_dimensions()
 test_linear_model()
 
-global_c = 1.0
+global_c = 10.0
 test_rbf()
